@@ -4,7 +4,7 @@ import openai
 from typing import Dict, Tuple
 
 # ========== Configuration ==========
-OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+OPENAI_API_KEY_ENV = "my-API-for-workforce_collab-diagnostic-discovery"
 openai.api_key = os.getenv(OPENAI_API_KEY_ENV, "")
 DEFAULT_MODEL = "gpt-4o"  # change as needed
 
