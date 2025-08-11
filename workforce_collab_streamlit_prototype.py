@@ -1,7 +1,8 @@
 import os
 import streamlit as st
 from openai import OpenAI
-from typing import Dict
+from openai.error import RateLimitError
+import re
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
@@ -17,115 +18,119 @@ CATEGORIES = [
     "Corporate Communications",
 ]
 
-def build_prompt(category: str, notes: str) -> str:
-    return f"""
-You are an enterprise IT strategy assistant. The user provided technical notes for the category: '{category}'.
+st.set_page_config(page_title="Workforce Collaboration Roadmap", layout="wide")
+st.title("Workforce Collaboration Roadmap & Executive Messaging")
 
-Tasks (produce three labeled sections):
-1) Roadmap: an actionable, prioritized roadmap (steps, rough order and estimated outcomes).
-2) CEO Summary: a 2-3 sentence explanation of why this category matters to the CEO and the value it provides the organization.
-3) CIO Talking Points: 2-3 concise bullets the CIO can use to sell the concept to leadership.
+st.markdown(
+    "Enter your technical notes below for each category. Click **Generate All** to produce a combined AI roadmap, CEO summary, and CIO talking points."
+)
 
-Technical Notes:
-{notes}
-
-Return your response with clear section headers exactly as: "Roadmap:", "CEO Summary:", "CIO Talking Points:" so the app can split them.
-"""
+# Collect notes for all categories
+notes_by_category = {}
+cols = st.columns(2)
+for i, category in enumerate(CATEGORIES):
+    with cols[i % 2]:
+        notes_by_category[category] = st.text_area(f"Technical Notes — {category}", height=130)
 
 @st.cache_data(show_spinner=False)
 def get_ai_response(prompt: str, model: str = "gpt-4o") -> str:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a concise, professional enterprise IT strategy assistant."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        max_tokens=600,
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a concise, professional enterprise IT strategy assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=1600,
+        )
+        return response.choices[0].message.content.strip()
+    except RateLimitError:
+        return "[Error] OpenAI rate limit exceeded. Please try again later."
+    except Exception as e:
+        return f"[Error] Unexpected error: {e}"
+
+def build_combined_prompt(notes_by_cat: dict) -> str:
+    intro = (
+        "You are an enterprise IT strategy assistant. For each category below, produce three labeled sections:\n"
+        "1) Roadmap: an actionable, prioritized roadmap.\n"
+        "2) CEO Summary: why this category matters to the CEO.\n"
+        "3) CIO Talking Points: 2-3 concise bullets the CIO can use to sell the concept.\n\n"
+        "Please return your response with clear section headers as:\n"
+        "\"Category: <category name>\",\n"
+        "\"Roadmap:\", \"CEO Summary:\", \"CIO Talking Points:\"\n\n"
+        "Here are the categories and their technical notes:\n"
     )
-    return response.choices[0].message.content.strip()
+    body = ""
+    for cat, notes in notes_by_cat.items():
+        body += f"\nCategory: {cat}\nTechnical Notes:\n{notes}\n"
 
-def split_output(output: str) -> Dict[str, str]:
-    sections = {"Roadmap": "", "CEO Summary": "", "CIO Talking Points": ""}
-    current = None
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("Roadmap:"):
-            current = "Roadmap"
-            sections[current] += stripped[len("Roadmap:"):].strip() + "\n"
-        elif stripped.startswith("CEO Summary:"):
-            current = "CEO Summary"
-            sections[current] += stripped[len("CEO Summary:"):].strip() + "\n"
-        elif stripped.startswith("CIO Talking Points:"):
-            current = "CIO Talking Points"
-            sections[current] += stripped[len("CIO Talking Points:"):].strip() + "\n"
-        elif current:
-            sections[current] += line + "\n"
-    for k in sections:
-        sections[k] = sections[k].strip()
-    return sections
+    return intro + body + "\n\nRespond clearly with labeled sections."
 
-# Streamlit UI
-st.set_page_config(page_title="Workforce Collaboration Roadmap Assistant", layout="wide")
-st.title("Workforce Collaboration — Roadmap & Executive Messaging Prototype")
-st.markdown("Enter technical notes per category. Generate an AI roadmap, a CEO summary, and CIO talking points for each category.")
+def parse_ai_response(response: str) -> dict:
+    # Parse the combined response into a nested dict by category and section
+    # Expected format:
+    # Category: Correspondence
+    # Roadmap:
+    # ...
+    # CEO Summary:
+    # ...
+    # CIO Talking Points:
+    # ...
+    # Category: Document Collaboration
+    # ...
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.subheader("Settings")
-    model = st.selectbox("Model", options=["gpt-4o", "gpt-4.1", "gpt-4o-mini", "gpt-3.5-turbo"], index=0)
-    auto_generate = st.checkbox("Auto-generate when notes change", value=False)
-    gen_button = st.button("Generate All")
+    results = {}
+    current_category = None
+    current_section = None
 
-with col2:
-    st.subheader("Export")
-    if st.button("Export All to Markdown"):
-        md_lines = ["# Workforce Collaboration Roadmap Export\n"]
-        for cat in CATEGORIES:
-            notes = st.session_state.get(f"notes__{cat}", "")
-            out = st.session_state.get(f"output__{cat}", "")
-            md_lines.append(f"## {cat}\n")
-            md_lines.append("**Technical Notes:**\n")
-            md_lines.append(notes + "\n")
-            md_lines.append("**AI Generated:**\n")
-            md_lines.append(out + "\n---\n")
-        md_blob = "\n".join(md_lines)
-        st.download_button("Download Markdown", md_blob, file_name="workforce_collab_roadmap.md", mime="text/markdown")
+    section_headers = {"Roadmap", "CEO Summary", "CIO Talking Points"}
 
-for category in CATEGORIES:
-    st.markdown(f"---\n### {category}")
-    notes_key = f"notes__{category}"
-    output_key = f"output__{category}"
+    lines = response.splitlines()
+    for line in lines:
+        line_strip = line.strip()
+        cat_match = re.match(r"Category:\s*(.*)", line_strip)
+        if cat_match:
+            current_category = cat_match.group(1).strip()
+            results[current_category] = {"Roadmap": "", "CEO Summary": "", "CIO Talking Points": ""}
+            current_section = None
+            continue
+        elif line_strip in section_headers:
+            current_section = line_strip
+            continue
+        elif current_category and current_section:
+            results[current_category][current_section] += line + "\n"
 
-    if notes_key not in st.session_state:
-        st.session_state[notes_key] = ""
-    if output_key not in st.session_state:
-        st.session_state[output_key] = ""
+    # Clean up whitespace
+    for cat in results:
+        for sec in results[cat]:
+            results[cat][sec] = results[cat][sec].strip()
 
-    notes = st.text_area(f"Technical Notes — {category}", value=st.session_state[notes_key], key=notes_key, height=150)
+    return results
 
-    should_call = False
-    if gen_button:
-        should_call = True
-    elif auto_generate and st.session_state[notes_key] != "":
-        should_call = True
+if st.button("Generate All"):
+    prompt = build_combined_prompt(notes_by_category)
+    with st.spinner("Generating AI roadmap and summaries..."):
+        ai_response = get_ai_response(prompt)
+    if ai_response.startswith("[Error]"):
+        st.error(ai_response)
+    else:
+        parsed = parse_ai_response(ai_response)
 
-    if should_call:
-        with st.spinner(f"Generating AI output for {category}..."):
-            prompt = build_prompt(category, st.session_state[notes_key])
-            ai_out = get_ai_response(prompt, model=model)
-            st.session_state[output_key] = ai_out
+        for category in CATEGORIES:
+            st.markdown(f"---\n## {category}")
+            roadmap = parsed.get(category, {}).get("Roadmap", "*No roadmap generated.*")
+            ceo = parsed.get(category, {}).get("CEO Summary", "*No CEO summary generated.*")
+            cio = parsed.get(category, {}).get("CIO Talking Points", "*No CIO talking points generated.*")
 
-    parsed = split_output(st.session_state.get(output_key, ""))
-    r1, r2, r3 = st.columns([1, 1, 1])
-    with r1:
-        st.markdown("**Roadmap**")
-        st.text_area(f"Roadmap — {category}", value=parsed.get("Roadmap", ""), height=150, key=f"roadmap__{category}")
-    with r2:
-        st.markdown("**CEO Summary**")
-        st.text_area(f"CEO Summary — {category}", value=parsed.get("CEO Summary", ""), height=100, key=f"ceo__{category}")
-    with r3:
-        st.markdown("**CIO Talking Points**")
-        st.text_area(f"CIO Talking Points — {category}", value=parsed.get("CIO Talking Points", ""), height=150, key=f"cio__{category}")
+            c1, c2, c3 = st.columns(3)
+            c1.markdown("**Roadmap**")
+            c1.text_area(f"Roadmap — {category}", value=roadmap, height=150, key=f"roadmap__{category}")
+            c2.markdown("**CEO Summary**")
+            c2.text_area(f"CEO Summary — {category}", value=ceo, height=100, key=f"ceo__{category}")
+            c3.markdown("**CIO Talking Points**")
+            c3.text_area(f"CIO Talking Points — {category}", value=cio, height=150, key=f"cio__{category}")
 
-st.markdown("---\n**Notes:** Set your OpenAI API key in Streamlit Cloud secrets or as an environment variable named `OPENAI_API_KEY`. Run locally with: `streamlit run workforce_collab_streamlit_prototype.py`")
+st.markdown(
+    "\n---\n*Make sure your OpenAI API key is set in your environment or Streamlit Secrets as `OPENAI_API_KEY`.*"
+)
