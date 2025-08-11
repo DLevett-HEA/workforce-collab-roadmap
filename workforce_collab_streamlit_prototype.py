@@ -1,10 +1,27 @@
-import os
 import streamlit as st
 from openai import OpenAI
+import os
 from typing import Dict
-import re
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+
+def call_openai(prompt: str, model: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful, professional enterprise IT assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        # Log error and return for display
+        st.error(f"OpenAI API call failed:\n{e}")
+        return ""
+
 
 CATEGORIES = [
     "Correspondence",
@@ -115,5 +132,18 @@ if st.button("Generate All"):
             with c3:
                 st.markdown("**CIO Talking Points**")
                 st.text_area(f"CIO Talking Points — {category}", value=cio_points, height=150)
+
+# In your main UI code where you trigger generation:
+if gen_button:
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("🚨 OpenAI API key not found! Set OPENAI_API_KEY in Streamlit Secrets.")
+    else:
+        with st.spinner("Generating AI output..."):
+            ai_output = call_openai(your_prompt, model=model)
+        if ai_output:
+            # Process and display output
+            st.session_state[output_key] = ai_output
+        else:
+            st.warning("No output generated. Please check the error message above and try again.")
 
 st.markdown("---\n*Make sure your OPENAI_API_KEY is set in Streamlit Cloud Secrets or your environment.*")
